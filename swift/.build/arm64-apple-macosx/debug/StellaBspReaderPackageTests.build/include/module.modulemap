@@ -1,0 +1,3 @@
+module StellaBspReaderPackageTests {
+    header "/Users/takashi/Hesperis-Ephemeris_reader/swift/.build/arm64-apple-macosx/debug/StellaBspReaderPackageTests.build/include/StellaBspReaderPackageTests-Swift.h"
+}

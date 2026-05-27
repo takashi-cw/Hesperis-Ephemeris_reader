@@ -1,0 +1,12 @@
+[package]
+name = "stella-bsp-reader"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust reader for NASA JPL BSP/SPK binary ephemeris files"
+license = "MIT"
+
+[lib]
+name = "stella_bsp_reader"
+crate-type = ["rlib"]
+
+[dependencies]

@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/takashi/Hesperis-Ephemeris_reader/swift/.build/arm64-apple-macosx/debug/StellaBspReaderTests.build/primary.swiftdeps"
+  },
+  "/Users/takashi/Hesperis-Ephemeris_reader/swift/Tests/StellaBspReaderTests/StellaBspReaderTests.swift": {
+    "dependencies": "/Users/takashi/Hesperis-Ephemeris_reader/swift/.build/arm64-apple-macosx/debug/StellaBspReaderTests.build/StellaBspReaderTests.d",
+    "object": "/Users/takashi/Hesperis-Ephemeris_reader/swift/.build/arm64-apple-macosx/debug/StellaBspReaderTests.build/StellaBspReaderTests.swift.o",
+    "swiftmodule": "/Users/takashi/Hesperis-Ephemeris_reader/swift/.build/arm64-apple-macosx/debug/StellaBspReaderTests.build/StellaBspReaderTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/takashi/Hesperis-Ephemeris_reader/swift/.build/arm64-apple-macosx/debug/StellaBspReaderTests.build/StellaBspReaderTests.swiftdeps",
+    "diagnostics": "/Users/takashi/Hesperis-Ephemeris_reader/swift/.build/arm64-apple-macosx/debug/StellaBspReaderTests.build/StellaBspReaderTests.dia"
+  }
+}

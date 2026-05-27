@@ -1,0 +1,9 @@
+name = "StellaBspReader"
+uuid = "00000000-0000-0000-0000-000000000000"
+authors = ["Takashi Shiga"]
+version = "0.1.0"
+
+[deps]
+
+[compat]
+julia = "1.9"

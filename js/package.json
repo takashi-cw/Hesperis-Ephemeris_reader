@@ -1,0 +1,36 @@
+{
+  "name": "stella-bsp-reader",
+  "version": "0.1.0",
+  "description": "JPL DE ephemeris (.bsp / SPK Type 2) reader for Node.js and browser — pure JavaScript, no build tools required",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./src/bsp-reader": "./src/bsp-reader.js",
+    "./src/bsp-validator": "./src/bsp-validator.js",
+    "./src/constants": "./src/constants.js",
+    "./src/chebyshev": "./src/chebyshev.js"
+  },
+  "scripts": {
+    "test": "node --test test/bsp-reader.test.js"
+  },
+  "files": [
+    "index.js",
+    "src/"
+  ],
+  "keywords": [
+    "astronomy",
+    "ephemeris",
+    "JPL",
+    "DE440",
+    "BSP",
+    "SPK",
+    "NAIF",
+    "celestial mechanics"
+  ],
+  "author": "Stella series",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
