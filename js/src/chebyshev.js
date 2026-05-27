@@ -30,6 +30,10 @@ export function chebyshevEval(coeffs, x) {
   if (n === 0) return 0;
   if (n === 1) return coeffs[0];
 
+  // Clenshaw algorithm:
+  //   b_{n+1} = b_{n+2} = 0
+  //   b_k = c_k + 2x*b_{k+1} - b_{k+2}  (k = n..1)
+  //   f(x) = c_0 + x*b_1 - b_2
   let b2 = 0;
   let b1 = 0;
   for (let i = n - 1; i >= 1; i--) {
@@ -43,9 +47,16 @@ export function chebyshevEval(coeffs, x) {
 /**
  * Chebyshev 多項式の位置と速度（x に関する微分）を同時に計算する
  *
+ * 速度の導出:
+ *   b_k = c_k + 2x*b_{k+1} - b_{k+2}
+ *   db_k/dx = 2*b_{k+1} + 2x*(db_{k+1}/dx) - (db_{k+2}/dx)
+ *   df/dx = b_1 + x*(db_1/dx) - (db_2/dx)
+ *
  * @param {number[]} coeffs - Chebyshev 係数配列 [c0, c1, ..., cn]
  * @param {number} x - 評価点 [-1, 1]
  * @returns {{ position: number, dpdx: number }}
+ *   - position: f(x)
+ *   - dpdx: df/dx（正規化変数 x に対する微分）
  */
 export function chebyshevEvalWithDeriv(coeffs, x) {
   const n = coeffs.length;
@@ -74,9 +85,12 @@ export function chebyshevEvalWithDeriv(coeffs, x) {
  * @param {number} x - 評価点 [-1, 1]
  * @param {number} intervalDays - セグメントが対応する期間（日数）
  * @returns {{ position: number, velocity: number }}
+ *   - position: AU 等（係数の単位に依存）
+ *   - velocity: position/day
  */
 export function chebyshevEvalWithVelocity(coeffs, x, intervalDays) {
   const { position, dpdx } = chebyshevEvalWithDeriv(coeffs, x);
+  // dx/dt = 2 / intervalDays（正規化変数 x の時間微分）
   const velocity = dpdx * (2 / intervalDays);
   return { position, velocity };
 }

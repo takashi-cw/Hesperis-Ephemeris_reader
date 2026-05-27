@@ -15,6 +15,8 @@
 #
 # ライセンス: MIT
 
+using Mmap
+
 const _RECORD_SIZE = 1024
 const _SPK_TYPE_2  = Int32(2)
 const _SPK_TYPE_3  = Int32(3)
@@ -61,9 +63,15 @@ end
     load_bsp(path::String) -> BspFile
 
 .bsp ファイルをパスから読み込む。
+
+OS の mmap（メモリマップ）を使うため、de441.bsp（約 3 GB）のような
+大ファイルでもメモリ使用量はアクセスしたページ分のみに抑えられる。
+（Swift の `Data(contentsOf:options:.mappedIfSafe)` と同等の方式）
 """
 function load_bsp(path::String)::BspFile
-    data = read(path)
+    data = open(path, "r") do io
+        Mmap.mmap(io, Vector{UInt8})
+    end
     _bsp_from_bytes(data)
 end
 

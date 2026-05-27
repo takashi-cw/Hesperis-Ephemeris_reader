@@ -15,7 +15,9 @@
 //
 // ライセンス: MIT
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::chebyshev::{chebyshev_eval3, chebyshev_eval3_with_velocity};
 use crate::constants::{J2000_JD, SECS_PER_DAY};
@@ -85,6 +87,40 @@ pub struct BspSegment {
     pub end_idx:   usize,
 }
 
+// MARK: - データソース
+
+/// BSP データの保持方式
+///
+/// - Memory: `from_bytes` でロードした場合（テスト・小ファイル向け）
+/// - File: `load` でロードした場合（seek 方式 / 大ファイル向け）
+///
+/// de440s.bsp（32 MB）はどちらでも動作するが、
+/// de441.bsp（約 3 GB）のような大ファイルは File を必ず使うこと。
+enum BspData {
+    Memory(Vec<u8>),
+    File(Mutex<std::fs::File>),
+}
+
+impl BspData {
+    /// `offset` バイト目から `buf.len()` バイトを読み込む
+    ///
+    /// # Panics
+    /// File モードでシーク/読み取りに失敗した場合（ディスク障害等）
+    fn read_at(&self, offset: usize, buf: &mut [u8]) {
+        match self {
+            BspData::Memory(data) => {
+                buf.copy_from_slice(&data[offset..offset + buf.len()]);
+            }
+            BspData::File(mutex) => {
+                let mut file = mutex.lock().expect("BspData mutex not poisoned");
+                file.seek(SeekFrom::Start(offset as u64))
+                    .expect("BSP seek failed");
+                file.read_exact(buf).expect("BSP read failed");
+            }
+        }
+    }
+}
+
 // MARK: - BspFile
 
 /// パース済み .bsp ファイルのラッパー
@@ -93,24 +129,44 @@ pub struct BspFile {
     pub name:     String,
     /// セグメント一覧
     pub segments: Vec<BspSegment>,
-    data:         Vec<u8>,
+    data:         BspData,
     is_le:        bool,
 }
 
 impl BspFile {
     // MARK: - ロード
 
-    /// .bsp ファイルをパスから読み込む
+    /// .bsp ファイルをパスから seek 方式でロードする（大ファイル対応）
+    ///
+    /// ファイル全体をメモリに読み込まず、セグメントサマリーのみを解析する。
+    /// Chebyshev 係数の読み込みは `compute_chebyshev` 呼び出し時に逐次 seek して行う。
+    ///
+    /// # メモリ使用量
+    /// - サマリー（セグメントメタデータ）: 数 KB 程度
+    /// - Chebyshev 係数: 計算時に 1 レコード分（数百バイト）のみ
     pub fn load(path: &Path) -> Result<Self, BspError> {
-        let data = std::fs::read(path)?;
-        Self::from_bytes(data)
+        let mut file = std::fs::File::open(path)?;
+
+        // ファイルヘッダー（最初の 1024 バイト）を読み込む
+        let mut header = vec![0u8; RECORD_SIZE];
+        file.read_exact(&mut header)?;
+        let (nd, ni, first_sum_rec, is_le, name) = parse_file_record(&header)?;
+
+        // サマリーレコードを seek 方式で読み込む（ファイル全体は読まない）
+        let segments = parse_summaries_from_file(&mut file, nd, ni, first_sum_rec, is_le)?;
+
+        Ok(Self { name, segments, data: BspData::File(Mutex::new(file)), is_le })
     }
 
-    /// バイト列から直接初期化する（テスト用）
+    /// バイト列から直接初期化する（テスト・小ファイル向け）
+    ///
+    /// ファイル全体を `Vec<u8>` として保持する。
+    /// de440s.bsp（32 MB）以下なら問題ないが、
+    /// de441.bsp（約 3 GB）には `load()` を使うこと。
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, BspError> {
         let (nd, ni, first_sum_rec, is_le, name) = parse_file_record(&data)?;
         let segments = parse_summaries(&data, nd, ni, first_sum_rec, is_le)?;
-        Ok(Self { name, segments, data, is_le })
+        Ok(Self { name, segments, data: BspData::Memory(data), is_le })
     }
 
     // MARK: - 公開 API
@@ -280,23 +336,17 @@ impl BspFile {
 
     #[inline]
     fn read_f64(&self, offset: usize) -> f64 {
-        let bytes: [u8; 8] = self.data[offset..offset + 8].try_into().unwrap();
-        if self.is_le {
-            f64::from_le_bytes(bytes)
-        } else {
-            f64::from_be_bytes(bytes)
-        }
+        let mut buf = [0u8; 8];
+        self.data.read_at(offset, &mut buf);
+        if self.is_le { f64::from_le_bytes(buf) } else { f64::from_be_bytes(buf) }
     }
 
     #[allow(dead_code)]
     #[inline]
     fn read_i32(&self, offset: usize) -> i32 {
-        let bytes: [u8; 4] = self.data[offset..offset + 4].try_into().unwrap();
-        if self.is_le {
-            i32::from_le_bytes(bytes)
-        } else {
-            i32::from_be_bytes(bytes)
-        }
+        let mut buf = [0u8; 4];
+        self.data.read_at(offset, &mut buf);
+        if self.is_le { i32::from_le_bytes(buf) } else { i32::from_be_bytes(buf) }
     }
 }
 
@@ -390,6 +440,66 @@ fn parse_summaries(
                 end_sec,
                 start_idx: first_addr,
                 end_idx:   last_addr,
+            });
+        }
+
+        rec_num = next_rec;
+    }
+
+    Ok(segments)
+}
+
+// MARK: - サマリーレコード解析（seek 版）
+
+/// サマリーレコードをファイルから seek 方式で読み込む
+///
+/// `load()` 専用。1 レコード（1024 バイト）ずつ seek して読み込むため、
+/// ファイル全体をメモリに展開しない。
+fn parse_summaries_from_file(
+    file: &mut std::fs::File,
+    nd: usize,
+    ni: usize,
+    first_sum_rec: usize,
+    is_le: bool,
+) -> Result<Vec<BspSegment>, BspError> {
+    let summary_doubles = nd + (ni + 1) / 2;
+    let summary_bytes   = summary_doubles * 8;
+
+    let read_f64_s = |slice: &[u8], offset: usize| -> f64 {
+        let bytes: [u8; 8] = slice[offset..offset + 8].try_into().unwrap();
+        if is_le { f64::from_le_bytes(bytes) } else { f64::from_be_bytes(bytes) }
+    };
+    let read_i32_s = |slice: &[u8], offset: usize| -> i32 {
+        let bytes: [u8; 4] = slice[offset..offset + 4].try_into().unwrap();
+        if is_le { i32::from_le_bytes(bytes) } else { i32::from_be_bytes(bytes) }
+    };
+
+    let mut segments = Vec::new();
+    let mut rec_num = first_sum_rec;
+
+    while rec_num > 0 {
+        let rec_offset = ((rec_num - 1) * RECORD_SIZE) as u64;
+        file.seek(SeekFrom::Start(rec_offset))?;
+        let mut record = vec![0u8; RECORD_SIZE];
+        file.read_exact(&mut record)?;
+
+        let next_rec    = read_f64_s(&record, 0).round() as usize;
+        let n_summaries = read_f64_s(&record, 16).round() as usize;
+
+        for i in 0..n_summaries {
+            let base      = 24 + i * summary_bytes;
+            let start_sec = read_f64_s(&record, base);
+            let end_sec   = read_f64_s(&record, base + 8);
+            let int_base  = base + nd * 8;
+            let target    = read_i32_s(&record, int_base);
+            let center    = read_i32_s(&record, int_base + 4);
+            let spk_type  = read_i32_s(&record, int_base + 12);
+            let first_addr = read_i32_s(&record, int_base + 16) as usize;
+            let last_addr  = read_i32_s(&record, int_base + 20) as usize;
+
+            segments.push(BspSegment {
+                target, center, spk_type, start_sec, end_sec,
+                start_idx: first_addr, end_idx: last_addr,
             });
         }
 

@@ -17,9 +17,36 @@
 //! ライセンス: MIT
 
 use pyo3::prelude::*;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::Mutex;
 
 mod coord;
+
+// ============================================================
+// データソース（Memory: テスト・小ファイル / File: seek 方式）
+// ============================================================
+
+#[allow(dead_code)]
+enum BspData {
+    Memory(Vec<u8>),
+    File(Mutex<std::fs::File>),
+}
+
+impl BspData {
+    /// `offset` バイト目から `buf.len()` バイトを読み込む
+    fn read_at(&self, offset: usize, buf: &mut [u8]) {
+        match self {
+            BspData::Memory(data) => {
+                buf.copy_from_slice(&data[offset..offset + buf.len()]);
+            }
+            BspData::File(mutex) => {
+                let mut f = mutex.lock().expect("BspData mutex not poisoned");
+                f.seek(SeekFrom::Start(offset as u64)).expect("BSP seek failed");
+                f.read_exact(buf).expect("BSP read failed");
+            }
+        }
+    }
+}
 
 // ============================================================
 // DAF / SPK フォーマット定数
@@ -38,8 +65,10 @@ const SPK_TYPE_3: i32 = 3;
 
 #[derive(Debug, Clone)]
 struct Segment {
-    start_jd: f64,
-    end_jd: f64,
+    /// セグメント開始時刻（J2000.0 からの秒数）
+    start_sec: f64,
+    /// セグメント終了時刻（J2000.0 からの秒数）
+    end_sec: f64,
     target: i32,
     center: i32,
     spk_type: i32,
@@ -123,6 +152,7 @@ fn cheby_eval_with_deriv(coeffs: &[f64], x: f64) -> (f64, f64) {
 // DAF バイナリ解析（bsp_pure.py の _parse_daf 翻訳）
 // ============================================================
 
+#[allow(dead_code)]
 fn parse_daf(data: &[u8]) -> Result<Vec<Segment>, String> {
     let locidw = std::str::from_utf8(&data[0..8]).unwrap_or("");
     if !locidw.starts_with("DAF/SPK") && !locidw.starts_with("DAF/EK") {
@@ -149,8 +179,8 @@ fn parse_daf(data: &[u8]) -> Result<Vec<Segment>, String> {
             let off = rec_offset + 24 + i * summary_bytes;
             let int_off = off + nd * 8;
             segments.push(Segment {
-                start_jd:   read_f64_le(data, off),
-                end_jd:     read_f64_le(data, off + 8),
+                start_sec:  read_f64_le(data, off),
+                end_sec:    read_f64_le(data, off + 8),
                 target:     read_i32_le(data, int_off),
                 center:     read_i32_le(data, int_off + 4),
                 spk_type:   read_i32_le(data, int_off + 12),
@@ -165,91 +195,53 @@ fn parse_daf(data: &[u8]) -> Result<Vec<Segment>, String> {
     Ok(segments)
 }
 
-// ============================================================
-// Type 2 / Type 3 セグメント計算（bsp_pure.py の _compute_chebyshev 翻訳）
-// ============================================================
+/// seek 方式でサマリーレコードのみを読み込む（大ファイル対応）
+fn parse_summaries_from_file(
+    file: &mut std::fs::File,
+    nd: usize,
+    ni: usize,
+    first_sum_rec: usize,
+) -> Result<Vec<Segment>, String> {
+    let summary_doubles = nd + (ni + 1) / 2;
+    let summary_bytes = summary_doubles * 8;
 
-/// Type 2（components=3）および Type 3（components=6）共通の Chebyshev 評価。
-/// jd_tdb がカバー範囲外の場合は PyValueError を返す。
-fn compute_chebyshev(
-    data: &[u8],
-    seg: &Segment,
-    jd_tdb: f64,
-    with_velocity: bool,
-    components: usize,
-) -> PyResult<([f64; 3], Option<[f64; 3]>)> {
-    let data_start = (seg.first_addr as usize - 1) * 8;
-    let data_end = seg.last_addr as usize * 8;
-    let meta_offset = data_end - 32;
+    let mut segments = Vec::new();
+    let mut rec_num = first_sum_rec;
 
-    let init   = read_f64_le(data, meta_offset);
-    let intlen = read_f64_le(data, meta_offset + 8);
-    let rsize  = read_f64_le(data, meta_offset + 16).round() as usize;
-    let n      = read_f64_le(data, meta_offset + 24).round() as i64;
+    while rec_num > 0 {
+        let rec_offset = ((rec_num - 1) * RECORD_SIZE) as u64;
+        let mut rec_buf = [0u8; RECORD_SIZE];
+        file.seek(SeekFrom::Start(rec_offset))
+            .map_err(|e| e.to_string())?;
+        file.read_exact(&mut rec_buf)
+            .map_err(|e| e.to_string())?;
 
-    let t_sec = (jd_tdb - J2000_JD) * S_PER_DAY;
+        let next_rec = read_f64_le(&rec_buf, 0).round() as usize;
+        let n_summaries = read_f64_le(&rec_buf, 16).round() as usize;
 
-    // 範囲外チェック（サイレントクランプ禁止）
-    let t_min = init;
-    let t_max = init + n as f64 * intlen;
-    if t_sec < t_min || t_sec > t_max {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "out of coverage: t={:.1}s (valid {:.1}s – {:.1}s) for target={}",
-            t_sec, t_min, t_max, seg.target
-        )));
-    }
-
-    let idx = ((t_sec - init) / intlen) as i64;
-    let idx = idx.clamp(0, n - 1) as usize;
-
-    let rec_offset = data_start + idx * rsize * 8;
-    let mid    = read_f64_le(data, rec_offset);
-    let radius = read_f64_le(data, rec_offset + 8);
-
-    let x = (t_sec - mid) / radius;
-
-    let ncoeff = (rsize - 2) / components;
-    let base = rec_offset + 16;
-
-    let cx: Vec<f64> = (0..ncoeff).map(|k| read_f64_le(data, base + k * 8)).collect();
-    let cy: Vec<f64> = (0..ncoeff).map(|k| read_f64_le(data, base + ncoeff * 8 + k * 8)).collect();
-    let cz: Vec<f64> = (0..ncoeff).map(|k| read_f64_le(data, base + ncoeff * 8 * 2 + k * 8)).collect();
-
-    if with_velocity {
-        if components == 6 {
-            // Type 3: 速度係数を直接評価（km/s → km/day に変換）
-            let vx: Vec<f64> = (0..ncoeff).map(|k| read_f64_le(data, base + ncoeff * 8 * 3 + k * 8)).collect();
-            let vy: Vec<f64> = (0..ncoeff).map(|k| read_f64_le(data, base + ncoeff * 8 * 4 + k * 8)).collect();
-            let vz: Vec<f64> = (0..ncoeff).map(|k| read_f64_le(data, base + ncoeff * 8 * 5 + k * 8)).collect();
-            Ok((
-                [cheby_eval(&cx, x), cheby_eval(&cy, x), cheby_eval(&cz, x)],
-                Some([
-                    cheby_eval(&vx, x) * S_PER_DAY,
-                    cheby_eval(&vy, x) * S_PER_DAY,
-                    cheby_eval(&vz, x) * S_PER_DAY,
-                ]),
-            ))
-        } else {
-            // Type 2: 位置多項式を微分して速度を求める
-            let (px, dpx) = cheby_eval_with_deriv(&cx, x);
-            let (py, dpy) = cheby_eval_with_deriv(&cy, x);
-            let (pz, dpz) = cheby_eval_with_deriv(&cz, x);
-            let dxdt = S_PER_DAY / radius;
-            Ok((
-                [px, py, pz],
-                Some([dpx * dxdt, dpy * dxdt, dpz * dxdt]),
-            ))
+        for i in 0..n_summaries {
+            let off = 24 + i * summary_bytes;
+            let int_off = off + nd * 8;
+            segments.push(Segment {
+                start_sec:  read_f64_le(&rec_buf, off),
+                end_sec:    read_f64_le(&rec_buf, off + 8),
+                target:     read_i32_le(&rec_buf, int_off),
+                center:     read_i32_le(&rec_buf, int_off + 4),
+                spk_type:   read_i32_le(&rec_buf, int_off + 12),
+                first_addr: read_i32_le(&rec_buf, int_off + 16),
+                last_addr:  read_i32_le(&rec_buf, int_off + 20),
+            });
         }
-    } else {
-        Ok((
-            [cheby_eval(&cx, x), cheby_eval(&cy, x), cheby_eval(&cz, x)],
-            None,
-        ))
+
+        rec_num = next_rec;
     }
+
+    Ok(segments)
 }
 
 // ============================================================
 // BspReader クラス（PyO3 公開）
+// Type 2/3 計算は BspReader のプライベートメソッドとして実装（seek 対応）
 // ============================================================
 
 /// Rust 製 BSP リーダー。bsp_pure.py と同一 Python API を持つ。
@@ -258,9 +250,97 @@ fn compute_chebyshev(
 /// compute_position_and_velocity(target, center, jd_tdb) -> (list[float], list[float])
 #[pyclass]
 pub struct BspReader {
-    data: Vec<u8>,
+    data: BspData,
     bsp_path: String,
     segments: Vec<Segment>,
+}
+
+impl BspReader {
+    /// `offset` バイト目の f64 を読む（Memory/File 両対応）
+    fn read_f64_at(&self, offset: usize) -> f64 {
+        let mut buf = [0u8; 8];
+        self.data.read_at(offset, &mut buf);
+        f64::from_le_bytes(buf)
+    }
+
+    /// Type 2（components=3）および Type 3（components=6）共通の Chebyshev 評価。
+    /// jd_tdb がカバー範囲外の場合は PyValueError を返す。
+    fn compute_chebyshev_seg(
+        &self,
+        seg: &Segment,
+        jd_tdb: f64,
+        with_velocity: bool,
+        components: usize,
+    ) -> PyResult<([f64; 3], Option<[f64; 3]>)> {
+        let data_start = (seg.first_addr as usize - 1) * 8;
+        let data_end = seg.last_addr as usize * 8;
+        let meta_offset = data_end - 32;
+
+        let init   = self.read_f64_at(meta_offset);
+        let intlen = self.read_f64_at(meta_offset + 8);
+        let rsize  = self.read_f64_at(meta_offset + 16).round() as usize;
+        let n      = self.read_f64_at(meta_offset + 24).round() as i64;
+
+        let t_sec = (jd_tdb - J2000_JD) * S_PER_DAY;
+
+        // 範囲外チェック（サイレントクランプ禁止）
+        let t_min = init;
+        let t_max = init + n as f64 * intlen;
+        if t_sec < t_min || t_sec > t_max {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "out of coverage: t={:.1}s (valid {:.1}s – {:.1}s) for target={}",
+                t_sec, t_min, t_max, seg.target
+            )));
+        }
+
+        let idx = ((t_sec - init) / intlen) as i64;
+        let idx = idx.clamp(0, n - 1) as usize;
+
+        let rec_offset = data_start + idx * rsize * 8;
+        let mid    = self.read_f64_at(rec_offset);
+        let radius = self.read_f64_at(rec_offset + 8);
+
+        let x = (t_sec - mid) / radius;
+
+        let ncoeff = (rsize - 2) / components;
+        let base = rec_offset + 16;
+
+        let cx: Vec<f64> = (0..ncoeff).map(|k| self.read_f64_at(base + k * 8)).collect();
+        let cy: Vec<f64> = (0..ncoeff).map(|k| self.read_f64_at(base + ncoeff * 8 + k * 8)).collect();
+        let cz: Vec<f64> = (0..ncoeff).map(|k| self.read_f64_at(base + ncoeff * 8 * 2 + k * 8)).collect();
+
+        if with_velocity {
+            if components == 6 {
+                // Type 3: 速度係数を直接評価（km/s → km/day に変換）
+                let vx: Vec<f64> = (0..ncoeff).map(|k| self.read_f64_at(base + ncoeff * 8 * 3 + k * 8)).collect();
+                let vy: Vec<f64> = (0..ncoeff).map(|k| self.read_f64_at(base + ncoeff * 8 * 4 + k * 8)).collect();
+                let vz: Vec<f64> = (0..ncoeff).map(|k| self.read_f64_at(base + ncoeff * 8 * 5 + k * 8)).collect();
+                Ok((
+                    [cheby_eval(&cx, x), cheby_eval(&cy, x), cheby_eval(&cz, x)],
+                    Some([
+                        cheby_eval(&vx, x) * S_PER_DAY,
+                        cheby_eval(&vy, x) * S_PER_DAY,
+                        cheby_eval(&vz, x) * S_PER_DAY,
+                    ]),
+                ))
+            } else {
+                // Type 2: 位置多項式を微分して速度を求める
+                let (px, dpx) = cheby_eval_with_deriv(&cx, x);
+                let (py, dpy) = cheby_eval_with_deriv(&cy, x);
+                let (pz, dpz) = cheby_eval_with_deriv(&cz, x);
+                let dxdt = S_PER_DAY / radius;
+                Ok((
+                    [px, py, pz],
+                    Some([dpx * dxdt, dpy * dxdt, dpz * dxdt]),
+                ))
+            }
+        } else {
+            Ok((
+                [cheby_eval(&cx, x), cheby_eval(&cy, x), cheby_eval(&cz, x)],
+                None,
+            ))
+        }
+    }
 }
 
 #[pymethods]
@@ -269,12 +349,30 @@ impl BspReader {
     pub fn new(bsp_path: String) -> PyResult<Self> {
         let mut file = std::fs::File::open(&bsp_path)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)
+
+        // ファイルレコード（1024 バイト）だけ読んで nd/ni/first_sum_rec を取得
+        let mut header = [0u8; RECORD_SIZE];
+        file.read_exact(&mut header)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let segments = parse_daf(&data)
+
+        let locidw = std::str::from_utf8(&header[0..8]).unwrap_or("");
+        if !locidw.starts_with("DAF/SPK") && !locidw.starts_with("DAF/EK") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "非 SPK ファイルです。LOCIDW='{}'", locidw
+            )));
+        }
+        let nd = read_i32_le(&header, 8) as usize;
+        let ni = read_i32_le(&header, 12) as usize;
+        let first_sum_rec = read_i32_le(&header, 76) as usize;
+
+        let segments = parse_summaries_from_file(&mut file, nd, ni, first_sum_rec)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
-        Ok(BspReader { data, bsp_path, segments })
+
+        Ok(BspReader {
+            data: BspData::File(Mutex::new(file)),
+            bsp_path,
+            segments,
+        })
     }
 
     /// ICRS 位置ベクトルを返す [km]
@@ -290,7 +388,7 @@ impl BspReader {
                     "unsupported SPK type: {}", seg.spk_type
                 ))
             })?;
-            let (pos, _) = compute_chebyshev(&self.data, seg, jd_tdb, false, components)?;
+            let (pos, _) = self.compute_chebyshev_seg(seg, jd_tdb, false, components)?;
             return Ok(pos.to_vec());
         }
         let pos_t = self.pos_from_ssb(target, jd_tdb)?;
@@ -318,7 +416,7 @@ impl BspReader {
                     "unsupported SPK type: {}", seg.spk_type
                 ))
             })?;
-            let (pos, vel) = compute_chebyshev(&self.data, seg, jd_tdb, true, components)?;
+            let (pos, vel) = self.compute_chebyshev_seg(seg, jd_tdb, true, components)?;
             return Ok((pos.to_vec(), vel.unwrap().to_vec()));
         }
         let (pos_t, vel_t) = self.pos_vel_from_ssb(target, jd_tdb)?;
@@ -451,7 +549,6 @@ impl BspReader {
     }
 
     pub fn close(&mut self) {
-        self.data.clear();
         self.segments.clear();
     }
 
@@ -580,32 +677,34 @@ impl BspReader {
     }
 
     fn find_segment(&self, target: i32, center: i32, jd_tdb: f64) -> Option<&Segment> {
+        let t_sec = (jd_tdb - J2000_JD) * S_PER_DAY;
         self.segments.iter().find(|seg| {
             seg.target == target
                 && seg.center == center
-                && seg.start_jd <= jd_tdb
-                && jd_tdb <= seg.end_jd
+                && seg.start_sec <= t_sec
+                && t_sec <= seg.end_sec
         })
     }
 
     fn pos_from_ssb(&self, target: i32, jd_tdb: f64) -> PyResult<Vec<f64>> {
+        let t_sec = (jd_tdb - J2000_JD) * S_PER_DAY;
         if let Some(seg) = self.find_segment(target, SSB, jd_tdb) {
             let components = spk_components(seg.spk_type).ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!(
                     "unsupported SPK type: {}", seg.spk_type
                 ))
             })?;
-            let (pos, _) = compute_chebyshev(&self.data, seg, jd_tdb, false, components)?;
+            let (pos, _) = self.compute_chebyshev_seg(seg, jd_tdb, false, components)?;
             return Ok(pos.to_vec());
         }
         for seg in &self.segments {
-            if seg.target == target && seg.start_jd <= jd_tdb && jd_tdb <= seg.end_jd {
+            if seg.target == target && seg.start_sec <= t_sec && t_sec <= seg.end_sec {
                 let components = spk_components(seg.spk_type).ok_or_else(|| {
                     pyo3::exceptions::PyValueError::new_err(format!(
                         "unsupported SPK type: {}", seg.spk_type
                     ))
                 })?;
-                let (pos_fc, _) = compute_chebyshev(&self.data, seg, jd_tdb, false, components)?;
+                let (pos_fc, _) = self.compute_chebyshev_seg(seg, jd_tdb, false, components)?;
                 if seg.center == SSB {
                     return Ok(pos_fc.to_vec());
                 }
@@ -623,23 +722,24 @@ impl BspReader {
     }
 
     fn pos_vel_from_ssb(&self, target: i32, jd_tdb: f64) -> PyResult<(Vec<f64>, Vec<f64>)> {
+        let t_sec = (jd_tdb - J2000_JD) * S_PER_DAY;
         if let Some(seg) = self.find_segment(target, SSB, jd_tdb) {
             let components = spk_components(seg.spk_type).ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!(
                     "unsupported SPK type: {}", seg.spk_type
                 ))
             })?;
-            let (pos, vel) = compute_chebyshev(&self.data, seg, jd_tdb, true, components)?;
+            let (pos, vel) = self.compute_chebyshev_seg(seg, jd_tdb, true, components)?;
             return Ok((pos.to_vec(), vel.unwrap().to_vec()));
         }
         for seg in &self.segments {
-            if seg.target == target && seg.start_jd <= jd_tdb && jd_tdb <= seg.end_jd {
+            if seg.target == target && seg.start_sec <= t_sec && t_sec <= seg.end_sec {
                 let components = spk_components(seg.spk_type).ok_or_else(|| {
                     pyo3::exceptions::PyValueError::new_err(format!(
                         "unsupported SPK type: {}", seg.spk_type
                     ))
                 })?;
-                let (p_fc, v_fc) = compute_chebyshev(&self.data, seg, jd_tdb, true, components)?;
+                let (p_fc, v_fc) = self.compute_chebyshev_seg(seg, jd_tdb, true, components)?;
                 let v_fc = v_fc.unwrap();
                 if seg.center == SSB {
                     return Ok((p_fc.to_vec(), v_fc.to_vec()));

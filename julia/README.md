@@ -89,7 +89,7 @@ println("太陽速度 (km/day): vx=$(vel[1]) vy=$(vel[2]) vz=$(vel[3])")
 
 ### `load_bsp(path::String) -> BspFile`
 
-`.bsp` ファイルを読み込んでパースする。
+`.bsp` ファイルを読み込んでパースする。OS の mmap（メモリマップ）を使用するため、de441.bsp（約 3 GB）のような大ファイルもメモリ使用量を最小限に抑えて扱える。
 
 ### `BspFile` に対する関数
 
