@@ -474,12 +474,13 @@ impl BspReader {
     ///   use_j2000    : True → J2000.0 黄道（歳差・章動・光行差なし）
     ///   aberration   : True → 年周光行差を適用
     ///   deflection   : True → 光偏差（太陽重力場による偏向）を適用
+    ///   light_time   : True → 光行時間 τ = r/c を適用（False → τ=0、瞬時位置）
     ///
     /// Returns: [(lon_deg, lat_deg, dist_km, lonspeed_deg_per_day, latspeed_deg_per_day), ...]
     ///
-    /// deflection はキーワード省略可能（デフォルト true）。
+    /// deflection・light_time はキーワード省略可能（デフォルト true）。
     /// 2026/05 時点の既存呼び出し（5引数）との後方互換性を維持するため。
-    #[pyo3(signature = (naif_target, center_naif, jd_tdb_list, use_j2000, aberration, deflection=true))]
+    #[pyo3(signature = (naif_target, center_naif, jd_tdb_list, use_j2000, aberration, deflection=true, light_time=true))]
     pub fn compute_apparent_batch(
         &self,
         naif_target: i32,
@@ -488,6 +489,7 @@ impl BspReader {
         use_j2000: bool,
         aberration: bool,
         deflection: bool,
+        light_time: bool,
     ) -> PyResult<Vec<(f64, f64, f64, f64, f64)>> {
         let dt = coord::SPEED_DT_DAYS;
         let two_dt = 2.0 * dt;
@@ -495,11 +497,11 @@ impl BspReader {
 
         for &jd in &jd_tdb_list {
             let (lon, lat, dist) =
-                self.apparent_single(naif_target, center_naif, jd, use_j2000, aberration, deflection)?;
+                self.apparent_single(naif_target, center_naif, jd, use_j2000, aberration, deflection, light_time)?;
             let (lon_p, lat_p, _) =
-                self.apparent_single(naif_target, center_naif, jd + dt, use_j2000, aberration, deflection)?;
+                self.apparent_single(naif_target, center_naif, jd + dt, use_j2000, aberration, deflection, light_time)?;
             let (lon_m, lat_m, _) =
-                self.apparent_single(naif_target, center_naif, jd - dt, use_j2000, aberration, deflection)?;
+                self.apparent_single(naif_target, center_naif, jd - dt, use_j2000, aberration, deflection, light_time)?;
 
             let lon_p = lon_p % 360.0;
             let lon_m = lon_m % 360.0;
@@ -575,6 +577,7 @@ impl BspReader {
     ///
     /// deflection と aberration は独立に ON/OFF できる
     /// （apparent.py【D】2026/05/30 の分離仕様に対応。ステップ番号も同スクリプトと対応させている）。
+    /// light_time=false の場合は τ=0（瞬時位置。apparent.py【E】②-1 2026/08/03 対応）。
     fn apparent_single(
         &self,
         naif_target: i32,
@@ -583,13 +586,17 @@ impl BspReader {
         use_j2000: bool,
         aberration: bool,
         deflection: bool,
+        light_time: bool,
     ) -> PyResult<(f64, f64, f64)> {
-        // 1. 幾何学的距離 → 光行時間 τ
-        let geo_pos = self.compute_position(naif_target, center_naif, jd_tdb)?;
-        let geo_dist = (geo_pos[0]*geo_pos[0]
-                       + geo_pos[1]*geo_pos[1]
-                       + geo_pos[2]*geo_pos[2]).sqrt();
-        let tau = geo_dist / coord::C_KM_PER_DAY;
+        // 1. 幾何学的距離 → 光行時間 τ（light_time=false なら τ=0）
+        let tau = if light_time {
+            let geo_pos = self.compute_position(naif_target, center_naif, jd_tdb)?;
+            (geo_pos[0]*geo_pos[0]
+                + geo_pos[1]*geo_pos[1]
+                + geo_pos[2]*geo_pos[2]).sqrt() / coord::C_KM_PER_DAY
+        } else {
+            0.0
+        };
 
         // 2. 実体位置: target(t−τ) − center(t)  [ICRS, km]
         let center_ssb = self.pos_from_ssb(center_naif, jd_tdb)?;

@@ -77,6 +77,7 @@ results = reader.compute_apparent_batch(
     use_j2000=False,          # True → J2000.0 黄道（歳差・章動なし）, False → of-date 真黄道
     aberration=True,          # True → 年周光行差を適用
     deflection=True,          # True → 光偏差（太陽重力場による偏向）を適用
+    light_time=True,          # True → 光行時間 τ = r/c を適用（省略可・デフォルト True）
 )
 # → [(lon_deg, lat_deg, dist_km, lonspeed_deg/day, latspeed_deg/day), ...]
 ```
@@ -113,7 +114,7 @@ BSP ファイルを読み込んでインスタンスを生成します。
 | `compute_position_and_velocity` | `target, center, jd_tdb` | `([x,y,z], [vx,vy,vz])` | 位置＋速度 |
 | `compute_positions_batch` | `target, center, jd_list` | `[[x,y,z], ...]` | 位置バッチ ※1 |
 | `compute_positions_and_velocities_batch` | `target, center, jd_list` | `([[x,y,z],...], [[vx,vy,vz],...])` | 位置＋速度バッチ ※1 |
-| `compute_apparent_batch`（おまけ機能） | `naif_target, center_naif, jd_list, use_j2000, aberration, deflection` | `[(lon,lat,dist,lonspd,latspd), ...]` | 視位置バッチ ※1 ※2 |
+| `compute_apparent_batch`（おまけ機能） | `naif_target, center_naif, jd_list, use_j2000, aberration, deflection, light_time` | `[(lon,lat,dist,lonspd,latspd), ...]` | 視位置バッチ ※1 ※2 |
 | `compute_from_center_batch`（おまけ機能） | `naif_target, center_naif, jd_list, use_j2000, aberration` | `[(lon,lat,dist,lonspd,latspd), ...]` | 任意重心視位置バッチ ※1 ※3 |
 | `close()` | — | — | メモリ解放 |
 
@@ -124,6 +125,8 @@ BSP ファイルを読み込んでインスタンスを生成します。
 >
 > **※2 `compute_apparent_batch`**
 > 光行時（光が伝わる時間）・光偏差（太陽重力による光の曲がり）・年周光行差（地球公転による見かけのずれ）を補正した**視位置**を返す。
+> `deflection`・`light_time` は省略可能（デフォルト `True`）。`light_time=False` にすると
+> τ=0（瞬時位置）として扱う。
 >
 > **※3 `compute_from_center_batch`**
 > 地球以外の任意の天体を観測中心として視位置を計算する。光偏差補正なし・年周光行差のみ適用（Skyfield の `deflectors=[]` 相当）。

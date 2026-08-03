@@ -5,6 +5,17 @@ Hesperis Ephemeris Reader（BSP リーダー）としての変更履歴です。
 
 ---
 
+## 2026-08-03（続き）
+
+### 追加（Python 版 / Rust + PyO3）
+- `compute_apparent_batch` に `light_time: bool` 引数を新規追加
+  - 光行時間 τ = r/c（光が伝わる時間）の適用を独立に ON/OFF できるようになった
+  - `light_time=False` を指定すると τ=0（瞬時位置）として扱う
+- API 変更: `compute_apparent_batch(naif_target, center_naif, jd_tdb_list, use_j2000, aberration, deflection=True, light_time=True)`
+  - `light_time` はキーワード引数としてデフォルト値 `True` を持つため、
+    既存の5〜6引数呼び出し（`light_time` を渡さない呼び出し）はそのまま動作する
+    （PyO3 `#[pyo3(signature = ...)]` によるデフォルト値対応。破壊的変更なし）
+
 ## 2026-08-03
 
 ### 修正（Python 版 / Rust + PyO3）
