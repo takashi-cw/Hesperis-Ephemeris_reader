@@ -61,13 +61,14 @@ jd_list = [2451545.0 + i for i in range(365)]
 positions = reader.compute_positions_batch(399, 10, jd_list)
 # → [[x,y,z], ...]
 
-# 視位置バッチ（光行時・光行差補正あり）
+# 視位置バッチ（光行時・光偏差・光行差補正あり）
 results = reader.compute_apparent_batch(
     naif_target=399,          # ターゲット NAIF コード
     center_naif=399,          # 観測中心 NAIF コード（399=地球）
     jd_tdb_list=jd_list,      # JD（TDB）のリスト
     use_j2000=False,          # True → J2000.0 黄道（歳差・章動なし）, False → of-date 真黄道
-    aberration=True,          # True → 光偏差 + 年周光行差を適用
+    aberration=True,          # True → 年周光行差を適用
+    deflection=True,          # True → 光偏差（太陽重力場による偏向）を適用
 )
 # → [(lon_deg, lat_deg, dist_km, lonspeed_deg/day, latspeed_deg/day), ...]
 ```
@@ -104,7 +105,7 @@ BSP ファイルを読み込んでインスタンスを生成します。
 | `compute_position_and_velocity` | `target, center, jd_tdb` | `([x,y,z], [vx,vy,vz])` | 位置＋速度 |
 | `compute_positions_batch` | `target, center, jd_list` | `[[x,y,z], ...]` | 位置バッチ ※1 |
 | `compute_positions_and_velocities_batch` | `target, center, jd_list` | `([[x,y,z],...], [[vx,vy,vz],...])` | 位置＋速度バッチ ※1 |
-| `compute_apparent_batch` | `naif_target, center_naif, jd_list, use_j2000, aberration` | `[(lon,lat,dist,lonspd,latspd), ...]` | 視位置バッチ ※1 ※2 |
+| `compute_apparent_batch` | `naif_target, center_naif, jd_list, use_j2000, aberration, deflection` | `[(lon,lat,dist,lonspd,latspd), ...]` | 視位置バッチ ※1 ※2 |
 | `compute_from_center_batch` | `naif_target, center_naif, jd_list, use_j2000, aberration` | `[(lon,lat,dist,lonspd,latspd), ...]` | 任意重心視位置バッチ ※1 ※3 |
 | `close()` | — | — | メモリ解放 |
 

@@ -472,9 +472,14 @@ impl BspReader {
     ///   center_naif  : 観測中心 NAIF コード（399=地球）
     ///   jd_tdb_list  : JD（TDB）のリスト
     ///   use_j2000    : True → J2000.0 黄道（歳差・章動・光行差なし）
-    ///   aberration   : True → 光偏差 + 年周光行差を適用
+    ///   aberration   : True → 年周光行差を適用
+    ///   deflection   : True → 光偏差（太陽重力場による偏向）を適用
     ///
     /// Returns: [(lon_deg, lat_deg, dist_km, lonspeed_deg_per_day, latspeed_deg_per_day), ...]
+    ///
+    /// deflection はキーワード省略可能（デフォルト true）。
+    /// 2026/05 時点の既存呼び出し（5引数）との後方互換性を維持するため。
+    #[pyo3(signature = (naif_target, center_naif, jd_tdb_list, use_j2000, aberration, deflection=true))]
     pub fn compute_apparent_batch(
         &self,
         naif_target: i32,
@@ -482,6 +487,7 @@ impl BspReader {
         jd_tdb_list: Vec<f64>,
         use_j2000: bool,
         aberration: bool,
+        deflection: bool,
     ) -> PyResult<Vec<(f64, f64, f64, f64, f64)>> {
         let dt = coord::SPEED_DT_DAYS;
         let two_dt = 2.0 * dt;
@@ -489,11 +495,11 @@ impl BspReader {
 
         for &jd in &jd_tdb_list {
             let (lon, lat, dist) =
-                self.apparent_single(naif_target, center_naif, jd, use_j2000, aberration)?;
+                self.apparent_single(naif_target, center_naif, jd, use_j2000, aberration, deflection)?;
             let (lon_p, lat_p, _) =
-                self.apparent_single(naif_target, center_naif, jd + dt, use_j2000, aberration)?;
+                self.apparent_single(naif_target, center_naif, jd + dt, use_j2000, aberration, deflection)?;
             let (lon_m, lat_m, _) =
-                self.apparent_single(naif_target, center_naif, jd - dt, use_j2000, aberration)?;
+                self.apparent_single(naif_target, center_naif, jd - dt, use_j2000, aberration, deflection)?;
 
             let lon_p = lon_p % 360.0;
             let lon_m = lon_m % 360.0;
@@ -566,6 +572,9 @@ impl BspReader {
     ///
     /// apparent.py compute_apparent() を忠実に Rust 化。
     /// トポセントリック補正は省略（stella_engine では不使用）。
+    ///
+    /// deflection と aberration は独立に ON/OFF できる
+    /// （apparent.py【D】2026/05/30 の分離仕様に対応。ステップ番号も同スクリプトと対応させている）。
     fn apparent_single(
         &self,
         naif_target: i32,
@@ -573,6 +582,7 @@ impl BspReader {
         jd_tdb: f64,
         use_j2000: bool,
         aberration: bool,
+        deflection: bool,
     ) -> PyResult<(f64, f64, f64)> {
         // 1. 幾何学的距離 → 光行時間 τ
         let geo_pos = self.compute_position(naif_target, center_naif, jd_tdb)?;
@@ -593,38 +603,42 @@ impl BspReader {
             return Ok(coord::icrs_to_j2000_ecliptic(ax, ay, az));
         }
 
-        // 4. astrometric モード（光偏差・光行差スキップ）
-        if !aberration {
+        // 4. 両方 OFF → astrometric（光行時のみ）
+        if !aberration && !deflection {
             return Ok(coord::icrs_to_ecliptic(ax, ay, az, jd_tdb));
         }
 
-        // 5. 光偏差補正（太陽以外の天体のみ）
-        let (bx, by, bz) = if naif_target != coord::NAIF_SUN {
+        // 5. 光偏差補正（太陽以外の天体・deflection=true のときのみ）
+        let (mut bx, mut by, mut bz) = (ax, ay, az);
+        if deflection && naif_target != coord::NAIF_SUN {
             let sun_ssb = self.pos_from_ssb(coord::NAIF_SUN, jd_tdb)?;
             let sun_x = sun_ssb[0] - center_ssb[0];
             let sun_y = sun_ssb[1] - center_ssb[1];
             let sun_z = sun_ssb[2] - center_ssb[2];
             let (dx, dy, dz) = coord::apply_light_deflection(ax, ay, az, sun_x, sun_y, sun_z);
             let dist0 = (ax*ax + ay*ay + az*az).sqrt();
-            (dx * dist0, dy * dist0, dz * dist0)
-        } else {
-            (ax, ay, az)
-        };
+            bx = dx * dist0;
+            by = dy * dist0;
+            bz = dz * dist0;
+        }
 
-        // 6. 年周光行差補正（観測中心の重心速度 ±0.5 s 有限差分）
-        let e_plus  = self.pos_from_ssb(center_naif, jd_tdb + coord::ABERR_DT_DAYS)?;
-        let e_minus = self.pos_from_ssb(center_naif, jd_tdb - coord::ABERR_DT_DAYS)?;
-        let two_dt = 2.0 * coord::ABERR_DT_DAYS;
-        let vx = (e_plus[0] - e_minus[0]) / two_dt;
-        let vy = (e_plus[1] - e_minus[1]) / two_dt;
-        let vz = (e_plus[2] - e_minus[2]) / two_dt;
-        let (abr_x, abr_y, abr_z) = coord::apply_aberration(bx, by, bz, vx, vy, vz);
+        // 6. 年周光行差補正（観測中心の重心速度 ±0.5 s 有限差分・aberration=true のときのみ）
+        if aberration {
+            let e_plus  = self.pos_from_ssb(center_naif, jd_tdb + coord::ABERR_DT_DAYS)?;
+            let e_minus = self.pos_from_ssb(center_naif, jd_tdb - coord::ABERR_DT_DAYS)?;
+            let two_dt = 2.0 * coord::ABERR_DT_DAYS;
+            let vx = (e_plus[0] - e_minus[0]) / two_dt;
+            let vy = (e_plus[1] - e_minus[1]) / two_dt;
+            let vz = (e_plus[2] - e_minus[2]) / two_dt;
+            let (abr_x, abr_y, abr_z) = coord::apply_aberration(bx, by, bz, vx, vy, vz);
+            let dist = (bx*bx + by*by + bz*bz).sqrt();
+            bx = abr_x * dist;
+            by = abr_y * dist;
+            bz = abr_z * dist;
+        }
 
         // 7. ICRS → of-date 真黄道
-        let dist = (bx*bx + by*by + bz*bz).sqrt();
-        Ok(coord::icrs_to_ecliptic(
-            abr_x * dist, abr_y * dist, abr_z * dist, jd_tdb
-        ))
+        Ok(coord::icrs_to_ecliptic(bx, by, bz, jd_tdb))
     }
 
     /// compute_from_center の 1 JD 版（Rust 内部専用）
