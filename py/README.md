@@ -5,6 +5,14 @@ JPL DE 天体暦（`.bsp` / SPK Type 2・Type 3）を高速に読み込む、Rus
 PyO3 を使って Rust を Python から直接呼び出す構造になっており、  
 **Rust が主役・Python は呼び出し口**です。
 
+> 💡 **おまけ機能について**
+> このリポジトリの他言語版（js / julia / rust / swift）は「BSP/SPK の生読み取り」
+> のみがスコープですが、Python 版だけは `compute_apparent_batch` /
+> `compute_from_center_batch` という**視位置計算（光行時・光偏差・光行差補正）の
+> おまけ機能**が付いています。Python 版の開発元が Stella シリーズの本番エンジンを
+> 兼ねているためです。他言語版との整合性を気にする必要はなく、そのまま
+> 使いたい方だけお使いください。
+
 ---
 
 ## 構成
@@ -105,8 +113,8 @@ BSP ファイルを読み込んでインスタンスを生成します。
 | `compute_position_and_velocity` | `target, center, jd_tdb` | `([x,y,z], [vx,vy,vz])` | 位置＋速度 |
 | `compute_positions_batch` | `target, center, jd_list` | `[[x,y,z], ...]` | 位置バッチ ※1 |
 | `compute_positions_and_velocities_batch` | `target, center, jd_list` | `([[x,y,z],...], [[vx,vy,vz],...])` | 位置＋速度バッチ ※1 |
-| `compute_apparent_batch` | `naif_target, center_naif, jd_list, use_j2000, aberration, deflection` | `[(lon,lat,dist,lonspd,latspd), ...]` | 視位置バッチ ※1 ※2 |
-| `compute_from_center_batch` | `naif_target, center_naif, jd_list, use_j2000, aberration` | `[(lon,lat,dist,lonspd,latspd), ...]` | 任意重心視位置バッチ ※1 ※3 |
+| `compute_apparent_batch`（おまけ機能） | `naif_target, center_naif, jd_list, use_j2000, aberration, deflection` | `[(lon,lat,dist,lonspd,latspd), ...]` | 視位置バッチ ※1 ※2 |
+| `compute_from_center_batch`（おまけ機能） | `naif_target, center_naif, jd_list, use_j2000, aberration` | `[(lon,lat,dist,lonspd,latspd), ...]` | 任意重心視位置バッチ ※1 ※3 |
 | `close()` | — | — | メモリ解放 |
 
 > **※1 バッチ（batch）とは**
